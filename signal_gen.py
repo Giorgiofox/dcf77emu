@@ -66,11 +66,63 @@ def pulse_wave(samples: int, freq_hz: float, sample_rate: int,
     return wave, next_phase
 
 
+def quant_sine_wave(samples: int, freq_hz: float, sample_rate: int,
+                    phase: float = 0.0, levels: int = 8) -> tuple[np.ndarray, float]:
+    """Sine quantized to `levels` discrete amplitude steps.
+
+    Quantization injects odd harmonics: cleaner than square, richer than sine.
+    Useful for harmonic-mode carriers where the k-th harmonic must reach
+    77.5 kHz via speaker/cable nonlinearity. Inspired by DCF77.js distorter.
+    """
+    angle, next_phase = _phase_array(samples, freq_hz, sample_rate, phase)
+    s = np.sin(angle)
+    step = 2.0 / levels
+    wave = (np.round(s / step) * step).astype(np.float32)
+    return wave, next_phase
+
+
 WAVE_FUNCS = {
     "sine": sine_wave,
     "square": square_wave,
     "pulse": pulse_wave,
+    "quant": quant_sine_wave,
 }
+
+
+def lowshelf_attenuate(x: np.ndarray, sample_rate: int,
+                       cutoff_hz: float = 12000.0, gain_db: float = -24.0
+                       ) -> np.ndarray:
+    """Single-pole low-shelf attenuation: drop content below `cutoff_hz`.
+
+    Reduces audible whistle while leaving the high carrier and its harmonics
+    intact. RBJ biquad lowshelf, Q=0.707. Inspired by DCF77.js BiquadFilter.
+    """
+    A = 10.0 ** (gain_db / 40.0)
+    w0 = 2.0 * np.pi * cutoff_hz / sample_rate
+    cos_w0 = np.cos(w0)
+    sin_w0 = np.sin(w0)
+    alpha = sin_w0 / (2.0 * 0.707)
+    sqrtA = np.sqrt(A)
+
+    b0 = A * ((A + 1) - (A - 1) * cos_w0 + 2 * sqrtA * alpha)
+    b1 = 2 * A * ((A - 1) - (A + 1) * cos_w0)
+    b2 = A * ((A + 1) - (A - 1) * cos_w0 - 2 * sqrtA * alpha)
+    a0 = (A + 1) + (A - 1) * cos_w0 + 2 * sqrtA * alpha
+    a1 = -2 * ((A - 1) + (A + 1) * cos_w0)
+    a2 = (A + 1) + (A - 1) * cos_w0 - 2 * sqrtA * alpha
+
+    b = np.array([b0, b1, b2]) / a0
+    a = np.array([1.0, a1 / a0, a2 / a0])
+
+    y = np.zeros_like(x, dtype=np.float32)
+    x1 = x2 = y1 = y2 = 0.0
+    for i in range(len(x)):
+        xi = float(x[i])
+        yi = b[0] * xi + b[1] * x1 + b[2] * x2 - a[1] * y1 - a[2] * y2
+        x2, x1 = x1, xi
+        y2, y1 = y1, yi
+        y[i] = yi
+    return y
 
 
 def build_second(bit: int, second: int, carrier_hz: float, sample_rate: int,
