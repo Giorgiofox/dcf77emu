@@ -1,0 +1,26 @@
+[project]
+name = "dcf77emu"
+version = "0.1.0"
+description = "Cross-platform DCF77 audio emulator using sound-card harmonics"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Giorgio Campiotti" }]
+dependencies = [
+    "numpy>=1.24",
+    "sounddevice>=0.4.6",
+    "tzlocal>=5.0",
+    "tzdata>=2024.1; platform_system == 'Windows'",
+    "ntplib>=0.4.0",
+]
+
+[project.scripts]
+dcf77emu = "main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+include = ["dcf77.py", "signal_gen.py", "main.py", "timesync.py"]

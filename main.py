@@ -1,0 +1,254 @@
+"""DCF77 audio emulator entry point.
+
+Picks the highest supported sample rate and computes the audio carrier so
+that either the carrier itself (>=155 kHz sample rate) or a DAC-imaging
+spectral copy of the carrier (lower sample rates) lands on 77.5 kHz.
+Modulates with the DCF77 amplitude envelope encoding the current local
+time. Hold a radio-controlled clock near the audio jack to synchronize.
+"""
+
+from __future__ import annotations
+
+import argparse
+import queue
+import sys
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import numpy as np
+import sounddevice as sd
+
+from dcf77 import encode_minute
+from signal_gen import build_second
+from timesync import NtpOffset
+
+
+DCF77_HZ = 77500.0
+PREFERRED_SAMPLE_RATES = (48000, 44100)
+DEFAULT_NTP = "pool.ntp.org"
+DEFAULT_NTP_REFRESH = 3600
+
+
+def system_timezone() -> ZoneInfo:
+    local = datetime.now().astimezone()
+    name = local.tzinfo.tzname(local) if local.tzinfo else None
+    try:
+        if local.tzinfo is not None and hasattr(local.tzinfo, "key"):
+            return ZoneInfo(local.tzinfo.key)
+    except Exception:
+        pass
+    try:
+        import tzlocal
+        return ZoneInfo(tzlocal.get_localzone_name())
+    except Exception:
+        pass
+    if name:
+        try:
+            return ZoneInfo(name)
+        except ZoneInfoNotFoundError:
+            pass
+    return ZoneInfo("UTC")
+
+
+def pick_sample_rate(device: int | None, requested: int | None) -> int:
+    """Return a sample rate the output device supports.
+
+    If `requested` is given, validate and return it (or raise). Otherwise
+    try the preferred list from highest to lowest.
+    """
+    rates = (requested,) if requested else PREFERRED_SAMPLE_RATES
+    last_err: Exception | None = None
+    for fs in rates:
+        try:
+            sd.check_output_settings(device=device, samplerate=fs,
+                                     channels=1, dtype="float32")
+            return fs
+        except Exception as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"no supported sample rate: {last_err}")
+
+
+def carrier_for(sample_rate: int) -> tuple[float, str]:
+    """Return (audio_carrier_hz, mode) to produce 77.5 kHz at the DAC output."""
+    nyquist = sample_rate / 2.0
+    if DCF77_HZ < nyquist:
+        return DCF77_HZ, "direct"
+    for k in (1, 2, 3, 4, 5):
+        for sign in (-1, 1):
+            f = k * sample_rate + sign * DCF77_HZ
+            f = abs(f)
+            if 1000.0 < f < nyquist:
+                return f, f"image (k={k}, sign={'+' if sign > 0 else '-'})"
+    raise RuntimeError(f"cannot find image carrier for sample rate {sample_rate}")
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="DCF77 audio emulator")
+    p.add_argument("--timezone", "-t", default=None,
+                   help="IANA timezone (e.g. Europe/Rome). Default: system timezone")
+    p.add_argument("--carrier", "-c", type=float, default=None,
+                   help="Force audio carrier in Hz (default: auto-chosen)")
+    p.add_argument("--wave", "-w", choices=("sine", "square", "pulse"),
+                   default="square",
+                   help="Wave shape (default: square - strongest DAC imaging)")
+    p.add_argument("--device", "-d", type=int, default=None,
+                   help="Output device index (see --list-devices)")
+    p.add_argument("--list-devices", action="store_true",
+                   help="List audio output devices and exit")
+    p.add_argument("--sample-rate", "-r", type=int, default=None,
+                   help="Force sample rate (default: highest supported)")
+    p.add_argument("--ntp-server", default=DEFAULT_NTP,
+                   help=f"NTP server (default {DEFAULT_NTP})")
+    p.add_argument("--ntp-refresh", type=int, default=DEFAULT_NTP_REFRESH,
+                   help=f"NTP refresh interval in seconds (default {DEFAULT_NTP_REFRESH})")
+    p.add_argument("--no-ntp", action="store_true",
+                   help="Disable NTP sync, use system clock only")
+    return p.parse_args()
+
+
+def list_devices() -> None:
+    print(sd.query_devices())
+
+
+def _fmt_offset(off: timedelta) -> str:
+    ms = off.total_seconds() * 1000.0
+    sign = "+" if ms >= 0 else "-"
+    return f"{sign}{abs(ms):6.1f} ms"
+
+
+def run(tz: ZoneInfo, forced_carrier: float | None, forced_sample_rate: int | None,
+        device: int | None, ntp_server: str | None, ntp_refresh: int,
+        wave_kind: str) -> None:
+    sample_rate = pick_sample_rate(device, forced_sample_rate)
+    if forced_carrier is not None:
+        carrier, mode = forced_carrier, "forced"
+        if carrier * 2 >= sample_rate:
+            print(f"error: forced carrier {carrier} Hz above Nyquist for {sample_rate} Hz",
+                  file=sys.stderr)
+            sys.exit(2)
+    else:
+        carrier, mode = carrier_for(sample_rate)
+
+    ntp: NtpOffset | None = None
+    if ntp_server:
+        ntp = NtpOffset(ntp_server, ntp_refresh)
+        print(f"NTP: querying {ntp_server} ...")
+        if ntp.sync_once():
+            print(f"NTP: initial offset {_fmt_offset(ntp.offset)}")
+        else:
+            print("NTP: initial query failed, using system clock for now")
+        ntp.start()
+
+    def now_tz() -> datetime:
+        if ntp is not None:
+            return ntp.now(tz)
+        return datetime.now(tz)
+
+    audio_q: queue.Queue[np.ndarray] = queue.Queue(maxsize=4)
+    phase = 0.0
+    stop_event = threading.Event()
+
+    def producer_loop() -> None:
+        nonlocal phase
+        now = now_tz()
+        next_second = now.replace(microsecond=0) + timedelta(seconds=1)
+        sleep = (next_second - now).total_seconds()
+        if sleep > 0:
+            stop_event.wait(sleep)
+        if stop_event.is_set():
+            return
+
+        current_minute_start = next_second.replace(second=0)
+        bits = encode_minute(current_minute_start, tz)
+
+        while not stop_event.is_set():
+            t = now_tz()
+            sec_index = t.second
+            if sec_index == 0 and t.minute != current_minute_start.minute:
+                current_minute_start = t.replace(second=0, microsecond=0)
+                bits = encode_minute(current_minute_start, tz)
+
+            bit = bits[sec_index]
+            block, phase = build_second(bit, sec_index, carrier, sample_rate,
+                                        phase, wave_kind)
+            audio_q.put(block)
+
+            off_str = _fmt_offset(ntp.offset) if ntp else "  system  "
+            pulse = "none " if sec_index == 59 else ("200ms" if bit else "100ms")
+            line = (f"\r{t.strftime('%Y-%m-%d %H:%M:%S')} {tz.key}  "
+                    f"sec={sec_index:02d} bit={bit} pulse={pulse}  "
+                    f"NTP={off_str}   ")
+            sys.stdout.write(line)
+            sys.stdout.flush()
+
+            next_tick = t.replace(microsecond=0) + timedelta(seconds=1)
+            wait = (next_tick - now_tz()).total_seconds()
+            if wait > 0:
+                stop_event.wait(wait)
+
+    def callback(outdata, frames, time_info, status):
+        if status:
+            sys.stderr.write(f"\n{status}\n")
+        try:
+            block = audio_q.get_nowait()
+        except queue.Empty:
+            outdata.fill(0)
+            return
+        if len(block) < frames:
+            outdata[:len(block), 0] = block
+            outdata[len(block):, 0] = 0
+        else:
+            outdata[:, 0] = block[:frames]
+
+    stream = sd.OutputStream(
+        samplerate=sample_rate,
+        blocksize=sample_rate,
+        channels=1,
+        dtype="float32",
+        device=device,
+        callback=callback,
+    )
+
+    producer = threading.Thread(target=producer_loop, daemon=True)
+    producer.start()
+
+    print(f"sample rate:   {sample_rate} Hz")
+    print(f"audio carrier: {carrier:.2f} Hz  ({mode})")
+    print(f"wave shape:    {wave_kind}")
+    print(f"target RF:     77500 Hz  -> DCF77")
+    print(f"timezone:      {tz.key}")
+    print("ctrl-c to stop")
+    with stream:
+        try:
+            while True:
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            stop_event.set()
+            if ntp is not None:
+                ntp.stop()
+            print("\nstopped")
+
+
+def main() -> None:
+    args = parse_args()
+    if args.list_devices:
+        list_devices()
+        return
+    if args.timezone:
+        try:
+            tz = ZoneInfo(args.timezone)
+        except ZoneInfoNotFoundError:
+            print(f"error: unknown timezone '{args.timezone}'", file=sys.stderr)
+            sys.exit(2)
+    else:
+        tz = system_timezone()
+    ntp_server = None if args.no_ntp else args.ntp_server
+    run(tz, args.carrier, args.sample_rate, args.device, ntp_server,
+        args.ntp_refresh, args.wave)
+
+
+if __name__ == "__main__":
+    main()
