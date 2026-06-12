@@ -1,0 +1,16 @@
+{
+  "name": "Radio Clock Audio Sync",
+  "short_name": "RC Sync",
+  "description": "Sync DCF77/WWVB/JJY/MSF/BPC radio clocks through a phone speaker. No transmitter.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a0e0a",
+  "theme_color": "#0a0e0a",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

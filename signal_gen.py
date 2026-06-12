@@ -34,6 +34,13 @@ from __future__ import annotations
 import numpy as np
 
 
+# Default carrier amplitude. The method relies on the speaker/amp generating
+# a harmonic of a quiet tone, NOT on a loud carrier. A loud full-scale carrier
+# overdrives the output and buries the harmonic in distortion. Keep this low
+# (a few percent); raise only if the clock will not lock.
+DEFAULT_AMP = 0.05
+
+# kept for backward compatibility with the original DCF77-only path
 FULL_AMP = 0.98
 REDUCED_AMP = 0.147
 
@@ -125,19 +132,27 @@ def lowshelf_attenuate(x: np.ndarray, sample_rate: int,
     return y
 
 
-def build_second(bit: int, second: int, carrier_hz: float, sample_rate: int,
-                 phase: float = 0.0, wave_kind: str = "square"
-                 ) -> tuple[np.ndarray, float]:
-    """Build one second of audio with the DCF77 amplitude envelope applied."""
+def build_second(segments, carrier_hz: float, sample_rate: int,
+                 phase: float = 0.0, wave_kind: str = "square",
+                 amp: float = DEFAULT_AMP) -> tuple[np.ndarray, float]:
+    """Build one second of audio from a list of (ms, level) segments.
+
+    Each segment sets the carrier amplitude to ``amp * level`` for ``ms``
+    milliseconds. Levels come from the station protocol encoder (see
+    stations.py): 1.0 = full carrier, ~0.1-0.15 = reduced, 0.0 = off (OOK).
+    """
     if wave_kind not in WAVE_FUNCS:
         raise ValueError(f"unknown wave_kind: {wave_kind}")
     total = sample_rate
     wave, next_phase = WAVE_FUNCS[wave_kind](total, carrier_hz, sample_rate, phase)
 
-    envelope = np.full(total, FULL_AMP, dtype=np.float32)
-    if second != 59:
-        pulse_ms = 200 if bit else 100
-        pulse_samples = int(round(sample_rate * pulse_ms / 1000.0))
-        envelope[:pulse_samples] = REDUCED_AMP
+    envelope = np.zeros(total, dtype=np.float32)
+    idx = 0
+    for ms, level in segments:
+        n = int(round(sample_rate * ms / 1000.0))
+        envelope[idx:idx + n] = amp * level
+        idx += n
+    if idx < total:                      # rounding slack -> hold last level
+        envelope[idx:] = amp * segments[-1][1]
 
     return wave * envelope, next_phase

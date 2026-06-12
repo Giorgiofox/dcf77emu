@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0a0e0a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<title>radio clock audio sync</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>RADIO CLOCK AUDIO SYNC</h1>
+    <p class="sub">put a watch in manual receive, max the volume, drop it on the speaker. no transmitter, no hardware.</p>
+  </header>
+
+  <!-- clock -->
+  <section class="panel hero">
+    <div class="clock" id="clock">--:--:--</div>
+    <div class="meta">
+      <span id="zone">--</span> &middot; <span id="carrier">--</span> via <span id="fund">--</span>
+      &middot; <span id="syncstat" class="dim">local clock</span>
+    </div>
+    <div class="progress"><div class="bar" id="minbar"></div></div>
+    <div class="status">
+      <span id="txdot" class="dot off"></span>
+      <span id="txstat">idle</span>
+      <span class="spacer"></span>
+      <span id="secinfo" class="dim"></span>
+    </div>
+  </section>
+
+  <!-- visuals -->
+  <section class="panel">
+    <div class="vis-label">carrier spectrum <span class="dim" id="spectip"></span></div>
+    <canvas id="spectrum" height="120"></canvas>
+    <div class="vis-label" style="margin-top:12px">minute frame <span class="dim">(each cell = 1 second, height = carrier-reduction)</span></div>
+    <canvas id="frame" height="76"></canvas>
+    <div id="legend" class="legend"></div>
+  </section>
+
+  <!-- decoded -->
+  <section class="panel">
+    <div class="vis-label">transmitting</div>
+    <div class="decoded" id="decoded"></div>
+  </section>
+
+  <!-- controls -->
+  <section class="panel">
+    <div class="grid">
+      <label for="station">station</label>
+      <select id="station">
+        <option value="dcf77">DCF77 / Mainflingen (Germany) 77.5 kHz</option>
+        <option value="wwvb">WWVB / Fort Collins (USA) 60 kHz</option>
+        <option value="jjy60">JJY60 / Fukuoka-Saga (Japan) 60 kHz</option>
+        <option value="jjy40">JJY40 / Fukushima (Japan) 40 kHz</option>
+        <option value="msf">MSF / Anthorn (England) 60 kHz</option>
+        <option value="bpc">BPC / Shangqiu (China) 68.5 kHz [experimental]</option>
+      </select>
+
+      <label for="k">harmonic k</label>
+      <select id="k"></select>
+
+      <label for="wave">wave</label>
+      <select id="wave">
+        <option value="square" selected>square (rich harmonics, default)</option>
+        <option value="pulse">pulse (densest harmonics)</option>
+        <option value="sawtooth">sawtooth</option>
+        <option value="sine">sine (cleanest, weakest)</option>
+      </select>
+
+      <label for="gain">amplitude <span id="gainVal" class="dim"></span></label>
+      <input type="range" id="gain" min="0.005" max="0.3" step="0.005" value="0.05">
+
+      <label for="beast">amp mode</label>
+      <div class="row"><input type="checkbox" id="beast"> <span class="dim">3x amplitude, louder, stronger field</span></div>
+
+      <label for="offset">clock offset ms</label>
+      <div class="row">
+        <input type="number" id="offset" value="0" step="10">
+        <button id="calib" class="ghost mini">calibrate online</button>
+      </div>
+    </div>
+
+    <div class="warn" id="warn"></div>
+
+    <div class="btns">
+      <button id="start">START</button>
+      <button id="stop" class="ghost" disabled>STOP</button>
+    </div>
+  </section>
+
+  <section class="panel stat">
+    <span>device sample rate</span><b id="sr">--</b>
+    <span>device nyquist</span><b id="nyq">--</b>
+  </section>
+
+  <section class="panel">
+    <details>
+      <summary>how it works</summary>
+      <p>radio clocks lock onto a longwave carrier (DCF77 77.5 kHz, WWVB/JJY60/MSF 60 kHz, BPC 68.5 kHz, JJY40 40 kHz). no sound card outputs that directly. trick: emit a square tone at <code>carrier / k</code> (default <code>k=4</code>) at low amplitude. the phone speaker and amp are nonlinear, so they generate the k-th harmonic, which lands exactly on the carrier. that tone is amplitude-keyed each second to send the time frame in the station protocol.</p>
+      <p>setup: max system volume, plug in headphones or a 3.5 mm cable (the wire is the antenna), put the watch in manual receive, lay it within a few cm of the jack or speaker. give it 3 to 10 minutes. reposition the watch if it will not lock, the sweet spot is fussy. keep the room quiet and wifi/video off nearby.</p>
+      <p>if a band will not lock, try a different <code>k</code>: each phone radiates a different harmonic best. the spectrum view shows the fundamental you are emitting; the harmonic that does the work is inaudible and off-screen.</p>
+      <p>on iPhone: the physical mute switch silences Web Audio, so flip it off. iOS speakers also roll off hard near 19 kHz, which is the DCF77 <code>k=4</code> fundamental, so on iPhone pick <code>k=5</code> (15.5 kHz) for DCF77.</p>
+    </details>
+  </section>
+
+  <section class="panel">
+    <details>
+      <summary>which watch, which station</summary>
+      <p>radio controlled watches and clocks all listen on one of six longwave transmitters. the brand does not matter, the region the watch was tuned for does. pick the station for that region:</p>
+      <table class="bands">
+        <tr><th>region</th><th>station</th><th>carrier</th></tr>
+        <tr><td>continental Europe</td><td>DCF77</td><td>77.5 kHz</td></tr>
+        <tr><td>UK and Ireland</td><td>MSF</td><td>60 kHz</td></tr>
+        <tr><td>North America</td><td>WWVB</td><td>60 kHz</td></tr>
+        <tr><td>Japan (west, south)</td><td>JJY60</td><td>60 kHz</td></tr>
+        <tr><td>Japan (north, east)</td><td>JJY40</td><td>40 kHz</td></tr>
+        <tr><td>China</td><td>BPC</td><td>68.5 kHz</td></tr>
+      </table>
+
+      <p><b class="acc">Casio</b> is the big one. Wave Ceptor, G-Shock, Oceanus, Edifice, Pro Trek, Lineage. anything marked <b>Multi Band 6</b> (GW-M5610, GW-5000, GWX, Oceanus OCW) receives all six transmitters above, so any station here can sync it. the older Multi Band 5 and Multi Band 3 drop BPC and sometimes MSF. Casio receives through a ferrite bar near the 9 o clock side of the case, so lay that edge against the speaker.</p>
+
+      <p><b class="acc">Citizen</b> radio controlled and Eco-Drive Radio Controlled (Promaster, Attesa, Skyhawk, Perpetual Chrono) cover DCF77, WWVB and JJY, with worldwide models adding MSF and BPC. <b class="acc">Junghans</b> (Mega, Max Bill, Force) is German and DCF77 first, worldwide variants add WWVB and JJY. <b class="acc">Seiko</b>, <b class="acc">Braun</b> desk clocks, <b class="acc">Oregon Scientific</b>, <b class="acc">La Crosse</b>, <b class="acc">Bürk</b> and <b class="acc">Lorus</b> all follow the same six band scheme by region.</p>
+
+      <p>auto-receive watches choose the band from their <b>home city</b> setting. if yours will not pick the band you are emitting, temporarily set the home city to one in that region (Frankfurt for DCF77, London for MSF, New York or Denver for WWVB, Tokyo for JJY, Beijing for BPC), force a manual receive, then set the city back afterward.</p>
+
+      <p>the author of the original app reports a Casio 5610 locking with the case 9 o clock edge on the speaker. expect a few minutes. watches verify a full minute frame plus parity before they accept the time, so a clean uninterrupted run matters more than raw volume.</p>
+    </details>
+  </section>
+  <footer class="dim">
+    runs fully offline once loaded. nothing leaves the device except the optional clock calibration.<br>
+    built by <a href="https://giorgiocampiotti.com" target="_blank" rel="noopener">Giorgio Campiotti</a>
+    based on <a href="https://github.com/Giorgiofox/dcf77emu" target="_blank" rel="noopener">github.com/Giorgiofox/dcf77emu</a>
+  </footer>
+</div>
+
+<script src="encoders.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
