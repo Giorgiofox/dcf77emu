@@ -5,6 +5,8 @@ standard audio output. Syncs radio-controlled clocks and watches (Casio,
 Citizen, Junghans, Braun, Seiko ...) without a real transmitter or hardware
 modulator.
 
+**Live demo: https://giorgiocampiotti.com/clocksync**
+
 Supports six stations:
 
 | Station | Region | Carrier | Timezone |
